@@ -112,6 +112,10 @@ def main(argv):
     n_steps = config.n_steps
     n_batch = config.n_batch
 
+    checkpointer = Checkpointer('./cmcd_checkpoint.pkl')
+    # Best loss
+    best_loss = float('inf')
+
     # Run training loop
     with trange(n_steps) as steps:
         for step in steps:
@@ -130,6 +134,12 @@ def main(argv):
                 (1. - _prod_gamma_squared),
                 key,
             )
+            # Save model params
+            if loss < best_loss:
+                # Update best loss
+                best_loss = loss
+                # Save checkpoint
+                checkpointer.save(params)
             # Update model params
             updates, opt_state = opt.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
@@ -154,8 +164,6 @@ def main(argv):
         key,
     )
 
-    # Log histogram to qualitatively study sample quality
-    fig, ax = plt.subplots()
     # Compute densities
     x_values = np.linspace(-4, 4, 1000)
     density_x_0 = norm.pdf(x_values, loc=_mean_x_0, scale=_std_x_0)
