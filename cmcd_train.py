@@ -100,8 +100,9 @@ def main(argv):
 
     # Function to set all parameters to zeros
     def set_params_to_zeros(params):
-        return jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), params)
-    params = set_params_to_zeros(params)
+        return jax.tree_util.tree_map(lambda x: x, params)
+    
+    #params = set_params_to_zeros(params)
 
     # Optimiser initialisation
     opt = optax.adam(learning_rate=3e-4)
