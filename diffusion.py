@@ -87,7 +87,7 @@ class DDPM:
         log_w += jnp.squeeze(log_unnormalised_density_fn(x_0))
         return log_w
     
-    def sample_previous_eps_pred(self, x_t: jnp.ndarray, eps_pred: jnp.ndarray, t: int, key, lambda_ddpm=1.):
+    def sample_previous_eps_pred(self, x_t: jnp.ndarray, eps_pred: jnp.ndarray, t: int, key):
         """
         `lambda_ddpm = 1` corresponds to the DDPM, `lambda_ddpm = 0` corresponds to the DDIM.
         """
@@ -100,9 +100,31 @@ class DDPM:
             # Standard deviation ancestral normal, could also be set to sigma
             sigma_t = jnp.sqrt((1 - self.prod_gamma_squared[t-1]) / (1 - self.prod_gamma_squared[t]) * self.sigma_squared[t])
             # Sampling of previous augmentation
-            x_t = (x_t - self.sigma_squared[t] / self.std_marginal_x_t[t] * eps_pred) / self.gamma[t] + lambda_ddpm * sigma_t * eps
+            x_t = (x_t - self.sigma_squared[t] / self.std_marginal_x_t[t] * eps_pred) / self.gamma[t] + sigma_t * eps
         else:
             x_t = (x_t - self.sigma[t]*eps_pred) / self.gamma[t]
+        # Previous sample
+        return x_t
+    
+    def sample_previous_eps_pred_ddim(self, x_t: jnp.ndarray, eps_pred: jnp.ndarray, t: int, t_prev: int, key, eta: float = 1.):
+        """
+        `lambda_ddpm = 1` corresponds to the DDPM, `lambda_ddpm = 0` corresponds to the DDIM.
+        """
+        # Case distinction to simplify equations. The main motivation for this is that
+        # the ScoreNet takes a number between [0.0, 1.0] as input.
+        if t_prev >= 0:
+            # Sample noise
+            eps = jax.random.normal(key, shape=x_t.shape)
+            # Movable parameter DDIM, set to same as DDPM
+            sigma_t = eta * jnp.sqrt((1 - self.prod_gamma_squared[t_prev]) / (1 - self.prod_gamma_squared[t]) * (1. - self.prod_gamma_squared[t]/self.prod_gamma_squared[t_prev]))
+            # Sampling of previous augmentation
+            x_t = (
+                (x_t - jnp.sqrt(1-self.prod_gamma_squared[t]) * eps_pred) / self.gamma[t] + 
+                jnp.sqrt(1 - self.prod_gamma_squared[t_prev] - sigma_t**2) * eps_pred +  
+                sigma_t * eps
+            )
+        else:
+            x_t = (x_t - self.sigma[t_prev]*eps_pred) / self.gamma[t_prev]
         # Previous sample
         return x_t
 
