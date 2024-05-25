@@ -215,7 +215,7 @@ class LangevinDiffusion:
         )
         # Ensure that loss is not proportional to the number of steps
         # so it is more easily comparable accross runs
-        return jnp.mean(log_w) / self.T
+        return jnp.mean(-log_w) / self.T
 
 
 
