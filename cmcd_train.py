@@ -153,7 +153,7 @@ def main(argv):
             if step % config.n_steps_eval == 0:
                 key, subkey = jax.random.split(key)
                 x_T = jax.random.normal(key, shape=(config.n_samples_eval, 1))
-                _, log_w = langevin_diffuser.cmcd_train(
+                x_0, log_w = langevin_diffuser.cmcd_train(
                     params,
                     x_T,
                     drift_correction,
@@ -165,6 +165,10 @@ def main(argv):
                 )
                 # Create histogram for -log_w
                 wandb.log({"Log w": wandb.Histogram(np.array(-log_w))})
+                # Samples log-likelihood
+                log_likelihood = np.mean(norm.logpdf(x_0, loc=_mean_x_0, scale=_std_x_0))
+                # Log-likelihood should increase during training
+                wandb.log({"Mean log-likelihood": log_likelihood})
             # Update progress bar
             steps.set_postfix(val=loss)
 
