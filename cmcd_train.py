@@ -35,6 +35,9 @@ flags.DEFINE_integer("num_samples", 10_000, "Number of samples to generate")
 # Model hyperparameters
 flags.DEFINE_integer("hidden_dim", 128, "Dimension of hidden layers in the model")
 flags.DEFINE_integer("n_layers", 3, "Number of layers in the model")
+# Define number of validation steps
+flags.DEFINE_integer("n_steps_eval", 10, "Frequency for qualitative evaluation")
+flags.DEFINE_integer("n_samples_eval", 4096, "Number of samples in qualitative evaluation")
 
 def main(argv):
     # Initialize wandb and save hyperparameters
@@ -57,6 +60,9 @@ def main(argv):
             # Model hyperparameters
             "hidden_dim": FLAGS.hidden_dim,
             "n_layers": FLAGS.n_layers,
+            # Num steps eval
+            "n_steps_eval": FLAGS.n_steps_eval,
+            "n_samples_eval": FLAGS.n_samples_eval,
         }
     )
     config = wandb.config
@@ -102,8 +108,6 @@ def main(argv):
     def set_params_to_zeros(params):
         return jax.tree_util.tree_map(lambda x: x, params)
     
-    #params = set_params_to_zeros(params)
-
     # Optimiser initialisation
     opt = optax.adam(learning_rate=3e-4)
     opt_state = opt.init(params)
@@ -145,6 +149,22 @@ def main(argv):
             params = optax.apply_updates(params, updates)
             # wandb logging
             wandb.log({"Train Loss": loss})
+            # Compute histogram of log_w
+            if step % config.n_steps_eval == 0:
+                key, subkey = jax.random.split(key)
+                x_T = jax.random.normal(key, shape=(config.n_samples_eval, 1))
+                _, log_w = langevin_diffuser.cmcd_train(
+                    params,
+                    x_T,
+                    drift_correction,
+                    score_fn_reversed,
+                    lambda x : norm.logpdf(x, loc=_mean_x_0, scale=_std_x_0),
+                    lambda x : norm.logpdf(x),
+                    (1. - _prod_gamma_squared),
+                    key,
+                )
+                # Create histogram for -log_w
+                wandb.log({"Log w": wandb.Histogram(np.array(-log_w))})
             # Update progress bar
             steps.set_postfix(val=loss)
 
@@ -153,7 +173,7 @@ def main(argv):
     # Use for sampling
     key, subkey = jax.random.split(key)
     x_T = jax.random.normal(key, shape=(num_samples, 1))
-    x_0, _ = langevin_diffuser.cmcd_train(
+    x_0, log_w = langevin_diffuser.cmcd_train(
         params,
         x_T,
         drift_correction,
@@ -184,6 +204,9 @@ def main(argv):
 
     # Log the histogram to wandb
     wandb.log({"Trained Model Samples": wandb.Image(Image.open(image_data))})
+
+    # Create final histogram
+    wandb.log({"Test Log w": wandb.Histogram(np.array(-log_w))})
 
     wandb.finish()
 
