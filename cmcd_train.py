@@ -16,6 +16,7 @@ from models import MLP
 from schedulers import linear_schedule
 from langevin import LangevinConfig, LangevinDiffusion
 from checkpointer import Checkpointer
+from visualisation_utils import plt_to_image, visualise_samples_density
 
 # Define flags
 FLAGS = flags.FLAGS
@@ -30,6 +31,7 @@ flags.DEFINE_float("std_target", 0.1, "Standard deviation of the target distribu
 flags.DEFINE_integer("seed", 0, "Random seed")
 flags.DEFINE_integer("n_steps", 0, "Number of training steps")
 flags.DEFINE_integer("n_batch", 128, "Batch size for training")
+flags.DEFINE_float("lr", 3e-4, "Adam optimiser LR")
 # Test hyperparameters
 flags.DEFINE_integer("num_samples", 10_000, "Number of samples to generate")
 # Model hyperparameters
@@ -55,6 +57,7 @@ def main(argv):
             "seed": FLAGS.seed,
             "n_steps": FLAGS.n_steps,
             "n_batch": FLAGS.n_batch,
+            "lr": FLAGS.lr,
             # Test hyperparameters
             "num_samples": FLAGS.num_samples,
             # Model hyperparameters
@@ -86,6 +89,10 @@ def main(argv):
     _gamma = jnp.sqrt(_gamma_squared)
     _prod_gamma = jnp.cumprod(_gamma)
     _prod_gamma_squared = jnp.cumprod(_gamma_squared)
+    # Initialise density functions
+    target_density_fn = lambda x : norm.pdf(x, loc=_mean_x_0, scale=_std_x_0)
+    final_density_fn = lambda x : norm.pdf(x, loc=_mean_x_0*_prod_gamma[T-1], scale=jnp.sqrt(_prod_gamma[T-1]*_std_x_0)**2 + (1. - _prod_gamma_squared[T-1]))
+    sample_density_fn = lambda x : norm.pdf(x)
 
     # Score function for initial normal distribution
     def score_fn(x_t: jnp.array, t: int):
@@ -94,22 +101,19 @@ def main(argv):
     # Score function for initial normal distribution
     def score_fn_reversed(x_t: jnp.array, t: int):
         return -(x_t - _prod_gamma[T-t-1]*_mean_x_0)/((_prod_gamma[T-t-1]*_std_x_0)**2 + (1. - _prod_gamma_squared[T-t-1]))
-
+    
     # Initialise drift correction model
     drift_correction = MLP(hidden_dim=config.hidden_dim, out_dim=1, n_layers=config.n_layers)
+
     # Sample elements for initialisation
-    key, subkey = jax.random.split(key)
+    key, _ = jax.random.split(key)
     x_T = jax.random.normal(key, shape=(T, 1))
     t_T = jnp.expand_dims(jnp.linspace(start=0, stop=T, num=T)/T, axis=-1)
     # Init with an element for all steps
     params = drift_correction.init(key, jnp.concatenate([x_T, t_T], axis=-1))
-
-    # Function to set all parameters to zeros
-    def set_params_to_zeros(params):
-        return jax.tree_util.tree_map(lambda x: x, params)
     
     # Optimiser initialisation
-    opt = optax.adam(learning_rate=3e-4)
+    opt = optax.adam(learning_rate=config.lr)
     opt_state = opt.init(params)
 
     # Training parameters
@@ -189,29 +193,11 @@ def main(argv):
     )
 
     # Compute densities
-    x_values = np.linspace(-4, 4, 1000)
-    density_x_0 = norm.pdf(x_values, loc=_mean_x_0, scale=_std_x_0)
-    density_x_T = norm.pdf(x_values, loc=_mean_x_0*_prod_gamma[T-1], scale=jnp.sqrt(_prod_gamma[T-1]*_std_x_0)**2 + (1. - _prod_gamma_squared[T-1]))
-    density_standard = norm.pdf(x_values)
-
-    plt.hist(np.array(x_0), density=True, bins=50, label="Final Samples", color='blue')
-    plt.hist(np.array(x_T), density=True, bins=50, label="Initial Samples", color='red')
-    plt.plot(x_values, np.array(density_x_0), label='Target Density', color='blue')
-    plt.plot(x_values, np.array(density_x_T), label='Initial Density', color='red')
-    plt.plot(x_values, np.array(density_standard), label='Sample Density', color='green')
-    plt.legend()
-    # Save the plot to a buffer
-    from io import BytesIO
-    image_data = BytesIO() #Create empty in-memory file
-    plt.savefig(image_data, format='png') #Save pyplot figure to in-memory file
-    image_data.seek(0) #Move stream position back to beginning of file 
-
-    # Log the histogram to wandb
-    wandb.log({"Trained Model Samples": wandb.Image(Image.open(image_data))})
-
+    fig, ax = visualise_samples_density([x_T, x_0], [final_density_fn, target_density_fn, sample_density_fn], ["sample", "target", "standard"])
+    wandb.log({"Trained Model Samples": wandb.Image(plt_to_image(fig))})
     # Create final histogram
     wandb.log({"Test Log w": wandb.Histogram(np.array(-log_w))})
-
+    # Finish
     wandb.finish()
 
 if __name__ == '__main__':

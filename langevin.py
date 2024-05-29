@@ -77,7 +77,6 @@ class LangevinDiffusion:
         return x_t
     
     def annealed_langevin(self, x_0: jnp.array, score: Callable, steps_per_level: int, key, sigma : jnp.array = None):
-        # In this first implementation, the step size is not annealed
         x_t = x_0
         with trange(self.T) as steps:
             for t in steps:
