@@ -48,6 +48,93 @@ def score_gmm(x, prior, means, stds):
     mean_diffs = jnp.concatenate([(means[i]-x)/(stds[i]**2) for i in range(len(prior))], axis=-1)
     return jnp.sum(responsibilities * mean_diffs, axis=-1, keepdims=True)
 
+class GMM:
+  def __init__(self, prior: jnp.array, means: jnp.array, stds: jnp.array, noise_schedule: jnp.array):
+    self.prior = prior
+    self.means = means
+    self.stds = stds
+    self._noise_schedule = noise_schedule
+
+    self._gamma_squared = 1. - self._noise_schedule
+    self._gamma = jnp.sqrt(self._gamma_squared)
+    self._prod_gamma = jnp.cumprod(self._gamma)
+    self.prod_gamma_squared = jnp.cumprod(self._gamma_squared)
+
+  def density(self, x: jnp.array):
+    return jnp.sum(
+      jnp.concatenate([self.prior[i]*norm.pdf(x, loc=self.means[i], scale=self.stds[i]) for i in range(len(self.prior))], axis=-1), 
+      axis=-1, 
+      keepdims=True
+    )
+  
+  def log_density(self, x: jnp.array):
+    return logsumexp(
+      jnp.concatenate([jnp.log(self.prior[i])+norm.logpdf(x, loc=self.means[i], scale=self.stds[i]) for i in range(len(self.prior))], axis=-1), 
+      axis=-1, 
+      keepdims=True
+    )
+  
+  def score(self, x: jnp.array):
+    # Iterate over GMM components
+    responsibilities = softmax(jnp.concatenate([jnp.log(self.prior[i])+norm.logpdf(x, loc=self.means[i], scale=self.stds[i]) for i in range(len(self.prior))], axis=-1))
+    mean_diffs = jnp.concatenate([(self.means[i]-x)/(self.stds[i]**2) for i in range(len(self.prior))], axis=-1)
+    return jnp.sum(responsibilities * mean_diffs, axis=-1, keepdims=True)
+  
+  def noisy_density(self, x: jnp.array, t: int):
+    # Verify the step
+    assert t < len(self._noise_schedule)
+
+    return jnp.sum(
+      jnp.concatenate([
+        self.prior[i]*
+        norm.pdf(x, 
+          loc=self.means[i]*self._prod_gamma[t], 
+          scale=jnp.sqrt((self._prod_gamma[t]*self.stds[i])**2 + (1. - self.prod_gamma_squared[t])),
+        ) for i in range(len(self.prior))], axis=-1), 
+      axis=-1, 
+      keepdims=True
+    )
+
+  def noisy_log_density(self, x: jnp.array, t: int):
+    # Verify the step
+    assert t < len(self._noise_schedule)
+
+    return logsumexp(
+      jnp.concatenate([
+        jnp.log(self.prior[i])+
+        norm.logpdf(x, 
+          loc=self.means[i]*self._prod_gamma[t], 
+          scale=jnp.sqrt((self._prod_gamma[t]*self.stds[i])**2 + (1. - self.prod_gamma_squared[t])),
+        ) for i in range(len(self.prior))], axis=-1), 
+      axis=-1, 
+      keepdims=True
+    )
+  
+  def noisy_score(self, x: jnp.array, t: int):
+    # Iterate over GMM components
+    responsibilities = softmax(
+      jnp.concatenate([jnp.log(self.prior[i])+
+        norm.logpdf(x, 
+          loc=self.means[i]*self._prod_gamma[t], 
+          scale=jnp.sqrt((self._prod_gamma[t]*self.stds[i])**2 + (1. - self.prod_gamma_squared[t]))
+        ) 
+      for i in range(len(self.prior))], axis=-1)
+    )
+    mean_diffs = jnp.concatenate([
+      (self.means[i]*self._prod_gamma[t]-x)/(
+        (self._prod_gamma[t]*self.stds[i])**2 + (1. - self.prod_gamma_squared[t])
+      ) for i in range(len(self.prior))
+    ], axis=-1)
+    return jnp.sum(responsibilities * mean_diffs, axis=-1, keepdims=True)
+  
+  def noisy_score_reversed(self, x: jnp.array, t: int):
+    # Verify the step
+    assert t < len(self._noise_schedule)
+    T = len(self._noise_schedule)
+    # Score for reversed diffusion dynamics
+    return self.noisy_score(x, T-t-1)
+  
+  
 class Normal1D:
   def __init__(self, mean: jnp.array, std: jnp.array, noise_schedule: jnp.array):
     self.mean = mean
