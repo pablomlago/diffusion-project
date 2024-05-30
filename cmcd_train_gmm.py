@@ -9,6 +9,7 @@ from tqdm import trange
 import optax
 import wandb
 from absl import app, flags
+from haikunator import Haikunator
 
 from PIL import Image
 
@@ -28,9 +29,10 @@ flags.DEFINE_integer("T", 50, "Number of diffusion steps")
 flags.DEFINE_float("step_size", 0.01, "Size of each diffusion step")
 # Training params
 flags.DEFINE_integer("seed", 0, "Random seed")
-flags.DEFINE_integer("n_steps", 1, "Number of training steps")
+flags.DEFINE_integer("n_steps", 0, "Number of training steps")
 flags.DEFINE_integer("n_batch", 128, "Batch size for training")
 flags.DEFINE_float("lr", 3e-4, "Adam optimiser LR")
+flags.DEFINE_boolean("use_kl_loss", False, "Use alternative estimator for KL divergence")
 # Test hyperparameters
 flags.DEFINE_integer("num_samples", 10_000, "Number of samples to generate")
 # Model hyperparameters
@@ -41,10 +43,12 @@ flags.DEFINE_integer("n_steps_eval", 10, "Frequency for qualitative evaluation")
 flags.DEFINE_integer("n_samples_eval", 4096, "Number of samples in qualitative evaluation")
 
 def main(argv):
+    # Generate ID for the run
+    run_id = Haikunator().haikunate(delimiter='-', token_length=0)
     # Initialize wandb and save hyperparameters
     wandb.init(
         project="master-project",
-        name="cmcd-gmm",
+        name=f"cmcd-gmm-{run_id}",
         config={
             # Diffusion params
             "T": FLAGS.T,
@@ -54,6 +58,7 @@ def main(argv):
             "n_steps": FLAGS.n_steps,
             "n_batch": FLAGS.n_batch,
             "lr": FLAGS.lr,
+            "use_kl_loss": FLAGS.use_kl_loss,
             # Test hyperparameters
             "num_samples": FLAGS.num_samples,
             # Model hyperparameters
@@ -112,9 +117,11 @@ def main(argv):
     n_steps = config.n_steps
     n_batch = config.n_batch
 
-    checkpointer = Checkpointer('./cmcd_gmm_checkpoint.pkl')
+    checkpointer = Checkpointer(f'./cmcd_gmm-{run_id}.pkl')
     # Best loss
     best_loss = float('inf')
+
+    loss_fn = langevin_diffuser.cmcd_kl_loss if config.use_kl_loss else langevin_diffuser.cmcd_train_loss
 
     # Run training loop
     with trange(n_steps) as steps:
@@ -123,7 +130,7 @@ def main(argv):
             x_T = jax.random.normal(key, shape=(n_batch, 1))
             # Update key before running an iteration
             key, subkey = jax.random.split(key)
-            train_loss_fn = jax.jit(langevin_diffuser.cmcd_train_loss, static_argnums=(2,3,4,5))
+            train_loss_fn = jax.jit(loss_fn, static_argnums=(2,3,4,5))
             loss, grads = jax.value_and_grad(train_loss_fn)(
                 params,
                 x_T,

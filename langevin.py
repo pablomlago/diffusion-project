@@ -215,6 +215,31 @@ class LangevinDiffusion:
         # Ensure that loss is not proportional to the number of steps
         # so it is more easily comparable accross runs
         return jnp.mean(-log_w) / self.T
+    
+    def cmcd_kl_loss(
+        self,
+        params: jnp.array,
+        x_0: jnp.array,
+        drift_correction: nn.Module,
+        score: Callable,
+        log_density_target : Callable,
+        log_density_sample: Callable, 
+        sigma: jnp.array,
+        key: jnp.array,
+    ):
+        _, log_w = self.cmcd_train(
+            params,
+            x_0,
+            drift_correction,
+            score,
+            log_density_target,
+            log_density_sample, 
+            sigma,
+            key
+        )
+        # We are estimating the KL divergence, which is positive,
+        # in here we use an alternative estimator for the KL divergence
+        return jnp.mean((jnp.exp(log_w)-1.)-log_w) / self.T
 
 
 
