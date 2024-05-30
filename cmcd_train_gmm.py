@@ -98,6 +98,11 @@ def main(argv):
     t_T = jnp.expand_dims(jnp.linspace(start=0, stop=T, num=T)/T, axis=-1)
     # Init with an element for all steps
     params = drift_correction.init(key, jnp.concatenate([x_T, t_T], axis=-1))
+
+    # Zero output layer to start from a better initial point
+    output_layer_name = list(params['params'].keys())[-1]
+    params["params"][output_layer_name]["kernel"] = jnp.zeros_like(params["params"][output_layer_name]["kernel"])
+    params["params"][output_layer_name]["bias"] = jnp.zeros_like(params["params"][output_layer_name]["bias"])
     
     # Optimiser initialisation
     opt = optax.adam(learning_rate=config.lr)
