@@ -4,6 +4,7 @@ import numpy as np
 import jax.numpy as jnp
 import jax
 from jax.scipy.stats import norm
+from jax.scipy.special import logsumexp
 from tqdm import trange
 import optax
 import wandb
@@ -11,12 +12,13 @@ from absl import app, flags
 
 from PIL import Image
 
-from datasets import generate_gmm, log_gmm_density, gmm_density, score_gmm
+from datasets import generate_gmm, log_gmm_density, gmm_density, score_gmm, Normal1D
 from models import MLP
 from schedulers import linear_schedule
 from langevin import LangevinConfig, LangevinDiffusion
 from checkpointer import Checkpointer
 from visualisation_utils import plt_to_image, visualise_samples_density
+from utils import wrap_fn
 
 # Define flags
 FLAGS = flags.FLAGS
@@ -46,7 +48,6 @@ def main(argv):
     wandb.init(
         project="master-project",
         name="cmcd-gaussian",
-        mode="disabled",
         config={
             # Diffusion params
             "T": FLAGS.T,
@@ -81,28 +82,12 @@ def main(argv):
     )
     langevin_diffuser = LangevinDiffusion(langevin_config)
 
-    # Compute scores for target distribution
-    _mean_x_0 = config.mean_target
-    _std_x_0 = config.std_target
-    # Score function based on noise
-    _sigma_squared = linear_schedule(T)
-    _gamma_squared = 1. - _sigma_squared
-    _gamma = jnp.sqrt(_gamma_squared)
-    _prod_gamma = jnp.cumprod(_gamma)
-    _prod_gamma_squared = jnp.cumprod(_gamma_squared)
-    # Initialise density functions
-    target_density_fn = lambda x : norm.pdf(x, loc=_mean_x_0, scale=_std_x_0)
-    final_density_fn = lambda x : norm.pdf(x, loc=_mean_x_0*_prod_gamma[T-1], scale=jnp.sqrt(_prod_gamma[T-1]*_std_x_0)**2 + (1. - _prod_gamma_squared[T-1]))
-    sample_density_fn = lambda x : norm.pdf(x)
-
-    # Score function for initial normal distribution
-    def score_fn(x_t: jnp.array, t: int):
-        return -(x_t - _prod_gamma[t]*_mean_x_0)/((_prod_gamma[t]*_std_x_0)**2 + (1. - _prod_gamma_squared[t]))
-
-    # Score function for initial normal distribution
-    def score_fn_reversed(x_t: jnp.array, t: int):
-        return -(x_t - _prod_gamma[T-t-1]*_mean_x_0)/((_prod_gamma[T-t-1]*_std_x_0)**2 + (1. - _prod_gamma_squared[T-t-1]))
-    
+    # Initialise distribution
+    normal_distribution = Normal1D(
+        mean=jnp.array([[config.mean_target]]),
+        std=jnp.array([[config.std_target]]),
+        noise_schedule=linear_schedule(T)
+    )
     # Initialise drift correction model
     drift_correction = MLP(hidden_dim=config.hidden_dim, out_dim=1, n_layers=config.n_layers)
 
@@ -137,10 +122,10 @@ def main(argv):
                 params,
                 x_T,
                 drift_correction,
-                score_fn_reversed,
-                lambda x : norm.logpdf(x, loc=_mean_x_0, scale=_std_x_0),
+                normal_distribution.noisy_score_reversed,
+                normal_distribution.log_density,
                 lambda x : norm.logpdf(x),
-                (1. - _prod_gamma_squared),
+                (1. - normal_distribution.prod_gamma_squared),
                 key,
             )
             # Save model params
@@ -162,18 +147,22 @@ def main(argv):
                     params,
                     x_T,
                     drift_correction,
-                    score_fn_reversed,
-                    lambda x : norm.logpdf(x, loc=_mean_x_0, scale=_std_x_0),
+                    normal_distribution.noisy_score_reversed,
+                    normal_distribution.log_density,
                     lambda x : norm.logpdf(x),
-                    (1. - _prod_gamma_squared),
+                    (1. - normal_distribution.prod_gamma_squared),
                     key,
                 )
                 # Create histogram for -log_w
                 wandb.log({"Log w": wandb.Histogram(np.array(-log_w))})
                 # Samples log-likelihood
-                log_likelihood = np.mean(norm.logpdf(x_0, loc=_mean_x_0, scale=_std_x_0))
+                log_likelihood = np.mean(normal_distribution.log_density(x_0))
                 # Log-likelihood should increase during training
                 wandb.log({"Mean log-likelihood": log_likelihood})
+                # Computation of effective sample size
+                adjusted_sample_size = config.n_samples_eval/(1. + jnp.var(jnp.exp(log_w - logsumexp(log_w, axis=0, keepdims=True) + jnp.log(config.n_samples_eval))))
+                # Log-likelihood should increase during training
+                wandb.log({"Adjusted sample size": adjusted_sample_size})
             # Update progress bar
             steps.set_postfix(val=loss)
 
@@ -186,15 +175,17 @@ def main(argv):
         params,
         x_T,
         drift_correction,
-        score_fn_reversed,
-        lambda x : norm.logpdf(x, loc=_mean_x_0, scale=_std_x_0),
+        normal_distribution.noisy_score_reversed,
+        normal_distribution.log_density,
         lambda x : norm.logpdf(x),
-        (1. - _prod_gamma_squared),
+        (1. - normal_distribution.prod_gamma_squared),
         key,
     )
 
     # Compute densities
-    fig, ax = visualise_samples_density([x_T, x_0], [final_density_fn, target_density_fn, sample_density_fn], ["sample", "target", "standard"])
+    fig, ax = visualise_samples_density([x_T, x_0], [
+        wrap_fn(normal_distribution.noisy_density, T-1), normal_distribution.density, norm.pdf,
+    ], ["sample", "target", "standard"])
     wandb.log({"Trained Model Samples": wandb.Image(plt_to_image(fig))})
     # Create final histogram
     wandb.log({"Test Log w": wandb.Histogram(np.array(-log_w))})

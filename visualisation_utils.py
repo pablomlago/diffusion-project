@@ -21,16 +21,17 @@ def visualise_samples_density(xs: List[np.array], density_fns: List[Callable], l
     fig, ax = plt.subplots()
 
     # Values in which to evaluate the density
-    x_values = np.linspace(-np.abs(xlim), np.abs(xlim), 1000)
+    x_values = jnp.linspace(-jnp.abs(xlim), jnp.abs(xlim), 1000)
 
     # Show samples
     for i, x in enumerate(xs):
-        ax.hist(x, density=True, bins=n_bins, color=colours[i], alpha=0.5)
+        x = jnp.squeeze(x)
+        ax.hist(np.array(x), density=True, bins=n_bins, color=colours[i], alpha=0.5)
     
     # Show densities
     for i, density_fn in enumerate(density_fns):
-        density_x_values = density_fn(x_values)
-        ax.plot(x_values, density_x_values, label=labels[i], color=colours[i])
+        density_x_values = jnp.squeeze(density_fn(jnp.expand_dims(x_values, axis=-1)))
+        ax.plot(np.array(x_values), np.array(density_x_values), label=labels[i], color=colours[i])
 
     ax.legend()
 
