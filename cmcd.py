@@ -13,9 +13,9 @@ from haikunator import Haikunator
 
 from PIL import Image
 
-from datasets import generate_gmm, log_gmm_density, gmm_density, score_gmm, GMM
+from datasets import load_model
 from models import MLP
-from schedulers import linear_schedule
+from schedulers import NoiseScheduler, cosine_schedule
 from langevin import LangevinConfig, LangevinDiffusion
 from checkpointer import Checkpointer
 from visualisation_utils import plt_to_image, visualise_samples_density
@@ -27,7 +27,10 @@ FLAGS = flags.FLAGS
 # Diffusion params
 flags.DEFINE_integer("T", 50, "Number of diffusion steps")
 flags.DEFINE_float("step_size", 0.01, "Size of each diffusion step")
+# Which model to use
+flags.DEFINE_enum("dataset", "gmm", ["gmm", "normal"], "Dataset choice")
 # Training params
+flags.DEFINE_string("checkpoint_dir", ".", "Directory to save checkpoint")
 flags.DEFINE_integer("seed", 0, "Random seed")
 flags.DEFINE_integer("n_steps", 0, "Number of training steps")
 flags.DEFINE_integer("n_batch", 128, "Batch size for training")
@@ -53,7 +56,10 @@ def main(argv):
             # Diffusion params
             "T": FLAGS.T,
             "step_size": FLAGS.step_size,
+            # Model of the data
+            "dataset": FLAGS.dataset,
             # Training params
+            "checkpoint_dir": FLAGS.checkpoint_dir,
             "seed": FLAGS.seed,
             "n_steps": FLAGS.n_steps,
             "n_batch": FLAGS.n_batch,
@@ -80,19 +86,10 @@ def main(argv):
         T=T, step_size=config.step_size,
     )
     langevin_diffuser = LangevinDiffusion(langevin_config)
+    noise_scheduler = NoiseScheduler(scheduler=cosine_schedule)
 
     # Target distribution parameters
-    prior = jnp.array([[0.5], [0.5]])  # Priors for the two components
-    means = jnp.array([[-1], [1]]) # Means for each component
-    stds = jnp.array([[0.5], [0.5]]) # Standard deviations for each component
-
-    # GMM
-    gmm = GMM(
-        prior,
-        means,
-        stds,
-        linear_schedule(T)
-    )
+    data_model = load_model(noise_scheduler, model_name=config.dataset)
 
     # Initialise drift correction model
     drift_correction = MLP(hidden_dim=config.hidden_dim, out_dim=1, n_layers=config.n_layers)
@@ -117,7 +114,9 @@ def main(argv):
     n_steps = config.n_steps
     n_batch = config.n_batch
 
-    checkpointer = Checkpointer(f'./cmcd_gmm-{run_id}.pkl')
+    checkpoint_dir_name = f"{config.checkpoint_dir}/cmcd-{run_id}.pkl"
+
+    checkpointer = Checkpointer(checkpoint_dir_name)
     # Best loss
     best_loss = float('inf')
 
@@ -135,10 +134,9 @@ def main(argv):
                 params,
                 x_T,
                 drift_correction,
-                gmm.noisy_score_reversed,
-                gmm.log_density,
+                data_model.noisy_score_reversed,
+                data_model.log_density,
                 lambda x : norm.logpdf(x),
-                (1. - gmm.prod_gamma_squared),
                 key,
             )
             # Save model params
@@ -160,24 +158,25 @@ def main(argv):
                     params,
                     x_T,
                     drift_correction,
-                    gmm.noisy_score_reversed,
-                    gmm.log_density,
+                    data_model.noisy_score_reversed,
+                    data_model.log_density,
                     lambda x : norm.logpdf(x),
-                    (1. - gmm.prod_gamma_squared),
                     key,
                 )
-                # Create histogram for -log_w
-                wandb.log({"Log w": wandb.Histogram(np.array(-log_w))})
                 # Samples log-likelihood
-                log_likelihood = np.mean(gmm.log_density(x_0))
-                # Log-likelihood should increase during training
-                wandb.log({"Mean log-likelihood": log_likelihood})
+                log_likelihood = np.mean(data_model.log_density(x_0))
                 # Computation of effective sample size
                 adjusted_sample_size = config.n_samples_eval/(1. + jnp.var(jnp.exp(log_w - logsumexp(log_w, axis=0, keepdims=True) + jnp.log(config.n_samples_eval))))
-                # Log-likelihood should increase during training
-                wandb.log({"Adjusted sample size": adjusted_sample_size})
+                # Log validation data
+                wandb.log({"Log w": wandb.Histogram(np.array(-log_w)), "Mean log-likelihood": log_likelihood, "Adjusted sample size": adjusted_sample_size}, commit=False)
+            # wandb logging
+            wandb.log({"Train Loss": loss})
             # Update progress bar
             steps.set_postfix(val=loss)
+
+    params = checkpointer.load()
+    # Save checkpoint
+    wandb.save(checkpoint_dir_name)
 
     # Qualitative model evaluation
     num_samples = config.num_samples
@@ -188,16 +187,15 @@ def main(argv):
         params,
         x_T,
         drift_correction,
-        gmm.noisy_score_reversed,
-        gmm.log_density,
+        data_model.noisy_score_reversed,
+        data_model.log_density,
         lambda x : norm.logpdf(x),
-        (1. - gmm.prod_gamma_squared),
         key,
     )
 
     # Compute densities
     fig, ax = visualise_samples_density([x_T, x_0], [
-        wrap_fn(gmm.noisy_density, T-1), gmm.density, norm.pdf,
+        wrap_fn(data_model.noisy_density, 1.0), data_model.density, norm.pdf,
     ], ["sample", "target", "standard"])
     wandb.log({"Trained Model Samples": wandb.Image(plt_to_image(fig))})
     # Create final histogram

@@ -142,27 +142,23 @@ class LangevinDiffusion:
             drift_correction: nn.Module,
             score: Callable,
             log_density_target : Callable,
-            log_density_sample: Callable, 
-            sigma: jnp.array,
+            log_density_sample: Callable,
             key: jnp.array,
         ):
         # Auxiliar function to simplify computations
-        def compute_cmcd_terms(x_t, sigma, score, t):
-            annealing_factor = sigma[t]/sigma[self.T-1]
-            annealed_step_size = self.step_size * annealing_factor
+        def compute_cmcd_terms(x_t, score, t):
             score_x_t = score(x_t, t)
-            mean_x_t = x_t + annealed_step_size * score_x_t
-            t_T = jnp.expand_dims(jnp.repeat(jnp.atleast_1d(t)/(self.T-1), x_t.shape[0], axis=0), axis=-1)
+            mean_x_t = x_t + self.step_size * score_x_t
+            t_T = jnp.expand_dims(jnp.repeat(jnp.atleast_1d(t), x_t.shape[0], axis=0), axis=-1)
             x_t_input = jnp.concatenate([x_t, t_T], axis=-1)
             drift_correction_x_t = drift_correction.apply(params, x_t_input)
-            return annealed_step_size, mean_x_t, drift_correction_x_t
+            return mean_x_t, drift_correction_x_t
         # Use value on initialisation as first iterate
         x_t_prev = x_0
         (
-            annealed_step_size_prev, 
             mean_x_t_prev, 
             drift_correction_x_t_prev,
-        ) = compute_cmcd_terms(x_t_prev, sigma, score, 0)
+        ) = compute_cmcd_terms(x_t_prev, score, 0.)
         # Log-density for the sampling distribution
         log_w = - log_density_sample(x_t_prev)
 
@@ -171,21 +167,19 @@ class LangevinDiffusion:
             key, _ = jax.random.split(key)
             eps = jax.random.normal(key, shape=x_0.shape)
             # Generate next iterate using 
-            x_t = mean_x_t_prev + drift_correction_x_t_prev + jnp.sqrt(2*annealed_step_size_prev)*eps
+            x_t = mean_x_t_prev + drift_correction_x_t_prev + jnp.sqrt(2*self.step_size)*eps
             # Compute terms for log_w
-            (   
-                annealed_step_size, 
+            (
                 mean_x_t,
                 drift_correction_x_t
-            ) = compute_cmcd_terms(x_t, sigma, score, t)
+            ) = compute_cmcd_terms(x_t, score, t/(self.T-1))
             # Update log_w
             log_w += -0.5 * (
-                x_t.shape[1]*(jnp.log(2*annealed_step_size)-jnp.log(2*annealed_step_size_prev)) +
-                jnp.sum((x_t_prev - mean_x_t + drift_correction_x_t)**2, axis=1, keepdims=True)/(2*annealed_step_size) - 
-                jnp.sum((x_t - mean_x_t_prev - drift_correction_x_t_prev)**2, axis=1, keepdims=True)/(2*annealed_step_size_prev)
-            )
+                jnp.sum((x_t_prev - mean_x_t + drift_correction_x_t)**2, axis=1, keepdims=True) - 
+                jnp.sum((x_t - mean_x_t_prev - drift_correction_x_t_prev)**2, axis=1, keepdims=True)
+            ) / (2.*self.step_size)
             # Book-keeping for next step
-            x_t_prev, annealed_step_size_prev, mean_x_t_prev = x_t, annealed_step_size, mean_x_t
+            x_t_prev, mean_x_t_prev = x_t, mean_x_t
         # Log-density for the target distribution
         log_w += log_density_target(x_t)
         # Return latest step
@@ -198,8 +192,7 @@ class LangevinDiffusion:
         drift_correction: nn.Module,
         score: Callable,
         log_density_target : Callable,
-        log_density_sample: Callable, 
-        sigma: jnp.array,
+        log_density_sample: Callable,
         key: jnp.array,
     ):
         _, log_w = self.cmcd_train(
@@ -208,8 +201,7 @@ class LangevinDiffusion:
             drift_correction,
             score,
             log_density_target,
-            log_density_sample, 
-            sigma,
+            log_density_sample,
             key
         )
         # Ensure that loss is not proportional to the number of steps
@@ -223,8 +215,7 @@ class LangevinDiffusion:
         drift_correction: nn.Module,
         score: Callable,
         log_density_target : Callable,
-        log_density_sample: Callable, 
-        sigma: jnp.array,
+        log_density_sample: Callable,
         key: jnp.array,
     ):
         _, log_w = self.cmcd_train(
@@ -233,8 +224,7 @@ class LangevinDiffusion:
             drift_correction,
             score,
             log_density_target,
-            log_density_sample, 
-            sigma,
+            log_density_sample,
             key
         )
         # We are estimating the KL divergence, which is positive,
