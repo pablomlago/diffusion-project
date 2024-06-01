@@ -146,56 +146,6 @@ class LangevinDiffusion:
         # Return latest step
         return x_t, log_w
     
-    def cmcd_train(
-            self,
-            params: jnp.array,
-            x_0: jnp.array,
-            drift_correction: nn.Module,
-            score: Callable,
-            log_density_target : Callable,
-            log_density_sample: Callable,
-            key: jnp.array,
-        ):
-        # Auxiliar function to simplify computations
-        def compute_cmcd_terms(x_t, score, t):
-            score_x_t = score(x_t, t)
-            mean_x_t = x_t + self.step_size * score_x_t
-            t_T = jnp.expand_dims(jnp.repeat(jnp.atleast_1d(t), x_t.shape[0], axis=0), axis=-1)
-            x_t_input = jnp.concatenate([x_t, t_T], axis=-1)
-            drift_correction_x_t = drift_correction.apply(params, x_t_input)
-            return mean_x_t, drift_correction_x_t
-        # Use value on initialisation as first iterate
-        x_t_prev = x_0
-        (
-            mean_x_t_prev, 
-            drift_correction_x_t_prev,
-        ) = compute_cmcd_terms(x_t_prev, score, 0.)
-        # Log-density for the sampling distribution
-        log_w = - log_density_sample(x_t_prev)
-
-        for t in range(1, self.T):
-            # Generate random noise
-            key, _ = jax.random.split(key)
-            eps = jax.random.normal(key, shape=x_0.shape)
-            # Generate next iterate using 
-            x_t = mean_x_t_prev + drift_correction_x_t_prev + jnp.sqrt(2*self.step_size)*eps
-            # Compute terms for log_w
-            (
-                mean_x_t,
-                drift_correction_x_t
-            ) = compute_cmcd_terms(x_t, score, t/(self.T-1))
-            # Update log_w
-            log_w += -0.5 * (
-                jnp.sum((x_t_prev - mean_x_t + drift_correction_x_t)**2, axis=1, keepdims=True) - 
-                jnp.sum((x_t - mean_x_t_prev - drift_correction_x_t_prev)**2, axis=1, keepdims=True)
-            ) / (2.*self.step_size)
-            # Book-keeping for next step
-            x_t_prev, mean_x_t_prev = x_t, mean_x_t
-        # Log-density for the target distribution
-        log_w += log_density_target(x_t)
-        # Return latest step
-        return x_t, log_w
-    
     def _cmcd_step(
         self,
         cmcd_state: _CMCDScanState,
@@ -340,7 +290,7 @@ class LangevinDiffusion:
         log_density_sample: Callable,
         key: jnp.array,
     ):
-        _, log_w = self.cmcd_train(
+        _, log_w = self.cmcd_diffusion(
             params,
             x_0,
             drift_correction,

@@ -52,7 +52,6 @@ def main(argv):
     wandb.init(
         project="master-project",
         name=f"cmcd-gmm-{run_id}",
-        mode="disabled",
         config={
             # Diffusion params
             "T": FLAGS.T,
