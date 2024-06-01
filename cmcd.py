@@ -176,7 +176,7 @@ def main(argv):
 
     params = checkpointer.load()
     # Save checkpoint
-    wandb.save(checkpoint_dir_name)
+    # wandb.save(checkpoint_dir_name)
 
     # Qualitative model evaluation
     num_samples = config.num_samples
