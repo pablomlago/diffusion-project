@@ -32,7 +32,7 @@ flags.DEFINE_enum("dataset", "gmm", ["gmm", "normal"], "Dataset choice")
 # Training params
 flags.DEFINE_string("checkpoint_dir", ".", "Directory to save checkpoint")
 flags.DEFINE_integer("seed", 0, "Random seed")
-flags.DEFINE_integer("n_steps", 0, "Number of training steps")
+flags.DEFINE_integer("n_steps", 1, "Number of training steps")
 flags.DEFINE_integer("n_batch", 128, "Batch size for training")
 flags.DEFINE_float("lr", 3e-4, "Adam optimiser LR")
 flags.DEFINE_boolean("use_kl_loss", False, "Use alternative estimator for KL divergence")
@@ -52,6 +52,7 @@ def main(argv):
     wandb.init(
         project="master-project",
         name=f"cmcd-gmm-{run_id}",
+        mode="disabled",
         config={
             # Diffusion params
             "T": FLAGS.T,
