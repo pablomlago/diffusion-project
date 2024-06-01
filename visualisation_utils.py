@@ -15,8 +15,6 @@ colours = [
 ]
 
 def visualise_samples_density(xs: List[np.array], density_fns: List[Callable], labels: List[str], n_bins : int = 50, xlim: float = 4.):
-    # Clear previous plots
-    plt.clf()
     # Instantiate figure
     fig, ax = plt.subplots()
 
@@ -38,8 +36,6 @@ def visualise_samples_density(xs: List[np.array], density_fns: List[Callable], l
     return fig, ax
 
 def visualise_densities_1d(density_fns: List[Callable], labels: List[str], xlim: float = 4.):
-    # Clear previous plots
-    plt.clf()
     # Instantiate figure
     fig, ax = plt.subplots()
 

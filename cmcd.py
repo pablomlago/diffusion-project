@@ -1,4 +1,6 @@
 from functools import partial
+import matplotlib
+matplotlib.use('Agg')  # Set the backend before importing pyplot
 import matplotlib.pyplot as plt
 import numpy as np
 import jax.numpy as jnp
@@ -46,37 +48,51 @@ flags.DEFINE_integer("n_steps_eval", 10, "Frequency for qualitative evaluation")
 flags.DEFINE_integer("n_samples_eval", 4096, "Number of samples in qualitative evaluation")
 
 def main(argv):
+    config={
+        # Diffusion params
+        "T": FLAGS.T,
+        "step_size": FLAGS.step_size,
+        # Model of the data
+        "dataset": FLAGS.dataset,
+        # Training params
+        "checkpoint_dir": FLAGS.checkpoint_dir,
+        "seed": FLAGS.seed,
+        "n_steps": FLAGS.n_steps,
+        "n_batch": FLAGS.n_batch,
+        "lr": FLAGS.lr,
+        "use_kl_loss": FLAGS.use_kl_loss,
+        # Test hyperparameters
+        "num_samples": FLAGS.num_samples,
+        # Model hyperparameters
+        "hidden_dim": FLAGS.hidden_dim,
+        "n_layers": FLAGS.n_layers,
+        # Num steps eval
+        "n_steps_eval": FLAGS.n_steps_eval,
+        "n_samples_eval": FLAGS.n_samples_eval,
+    }
+    train_single(config)
+
+def train_sweep(config=None):
+    wandb.init(
+        config=config,
+    )
+    train(wandb.config)
+
+def train_single(config):
     # Generate ID for the run
     run_id = Haikunator().haikunate(delimiter='-', token_length=0)
     # Initialize wandb and save hyperparameters
     wandb.init(
         project="master-project",
         name=f"cmcd-gmm-{run_id}",
-        config={
-            # Diffusion params
-            "T": FLAGS.T,
-            "step_size": FLAGS.step_size,
-            # Model of the data
-            "dataset": FLAGS.dataset,
-            # Training params
-            "checkpoint_dir": FLAGS.checkpoint_dir,
-            "seed": FLAGS.seed,
-            "n_steps": FLAGS.n_steps,
-            "n_batch": FLAGS.n_batch,
-            "lr": FLAGS.lr,
-            "use_kl_loss": FLAGS.use_kl_loss,
-            # Test hyperparameters
-            "num_samples": FLAGS.num_samples,
-            # Model hyperparameters
-            "hidden_dim": FLAGS.hidden_dim,
-            "n_layers": FLAGS.n_layers,
-            # Num steps eval
-            "n_steps_eval": FLAGS.n_steps_eval,
-            "n_samples_eval": FLAGS.n_samples_eval,
-        }
+        config=config,
     )
-    config = wandb.config
+    train(wandb.config, run_id)
 
+
+def train(config=None, run_id=None):
+    # Generate ID for the run
+    run_id = Haikunator().haikunate(delimiter='-', token_length=0) if run_id is None else run_id
     # Generate RandomKey
     key = jax.random.PRNGKey(config.seed)
 
@@ -192,6 +208,8 @@ def main(argv):
         lambda x : norm.logpdf(x),
         key,
     )
+    # Compute validation loss
+    wandb.log({"val_loss": jnp.mean(-log_w) / T})
 
     # Compute densities
     fig, ax = visualise_samples_density([x_T, x_0], [
