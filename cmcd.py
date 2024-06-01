@@ -154,7 +154,7 @@ def main(argv):
             if step % config.n_steps_eval == 0:
                 key, subkey = jax.random.split(key)
                 x_T = jax.random.normal(key, shape=(config.n_samples_eval, 1))
-                x_0, log_w = langevin_diffuser.cmcd_train(
+                x_0, log_w = langevin_diffuser.cmcd_diffusion(
                     params,
                     x_T,
                     drift_correction,
@@ -183,7 +183,7 @@ def main(argv):
     # Use for sampling
     key, subkey = jax.random.split(key)
     x_T = jax.random.normal(key, shape=(num_samples, 1))
-    x_0, log_w = langevin_diffuser.cmcd_train(
+    x_0, log_w = langevin_diffuser.cmcd_diffusion(
         params,
         x_T,
         drift_correction,
