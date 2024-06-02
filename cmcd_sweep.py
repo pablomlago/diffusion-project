@@ -17,7 +17,7 @@ sweep_config = {
             'value': 0.05
         },
         'n_steps': {
-            'values': [50, 100, 500]
+            'value': 50
         },
         'n_batch': {
             'values': [64, 128, 512]
