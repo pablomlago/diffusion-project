@@ -14,22 +14,22 @@ sweep_config = {
             'value': 50
         },
         'step_size': {
-            'values': [0.01, 0.05, 0.1]
+            'value': 0.05
         },
         'n_steps': {
-            'value': 50
+            'values': [50, 100, 500]
         },
         'n_batch': {
-            'values': [64, 128, 256]
+            'values': [64, 128, 512]
         },
         'lr': {
-            'values': [0.001, 0.0003, 0.0001]
+            'values': [0.001, 0.0003]
         },
         'hidden_dim': {
-            'values': [32, 64, 128]
+            'value': 128
         },
         'n_layers': {
-            'values': [2, 3, 4]
+            'values': [3, 4]
         },
         'dataset': {
             'value': "gmm"
@@ -43,13 +43,13 @@ sweep_config = {
         'use_kl_loss': {
             'values': [False, True]
         },
-        'num_samples': {
-            'value': 10000
+        'n_samples_train': {
+            'values': [128, 1024, 10_000]
         },
         'n_steps_eval': {
-            'value': 10
+            'value': 5
         },
-        'n_samples_eval': {
+        'n_samples_val': {
             'value': 4096
         }
     }

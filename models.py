@@ -14,7 +14,7 @@ class MLP(nn.Module):
     def __call__(self, x):
         for _ in range(self.n_layers):
             x = nn.Dense(features=self.hidden_dim)(x)
-            x = nn.gelu(x)
+            x = nn.softplus(x)
         x = nn.Dense(features=self.out_dim)(x)
         return x
 
