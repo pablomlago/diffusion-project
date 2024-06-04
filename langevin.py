@@ -100,6 +100,18 @@ class LangevinDiffusion:
                     x_t = x_t + annealed_step_size * score(x_t, t) + jnp.sqrt(2*annealed_step_size)*eps
         # Return latest step
         return x_t
+    
+    def annealed_langevin_continuous(self, x_0: jnp.array, score: Callable, steps_per_level: int, key):
+        x_t = x_0
+        with trange(self.T) as steps:
+            for t in steps:
+                for _ in range(steps_per_level):
+                    # ULA update
+                    key, subkey = jax.random.split(key)
+                    eps = jax.random.normal(subkey, shape=x_0.shape)
+                    x_t = x_t + self.step_size * score(x_t, t/(self.T-1)) + jnp.sqrt(2*self.step_size)*eps
+        # Return latest step
+        return x_t
         
     def cmcd(
             self, 
@@ -206,6 +218,73 @@ class LangevinDiffusion:
         # Do not use accum_state, as we are interested in the last samples only
         return new_cmcd_state, None
     
+    def _cmcd_step_multiple(
+        self,
+        cmcd_state: _CMCDScanState,
+        i: int,
+        first_step: bool,
+        params: Dict,
+        drift_correction: nn.Module,
+        score: Callable,
+    ):
+        params_forward, params_backward = params
+        drift_correction_forward, drift_correction_backward = drift_correction
+        # Unpack terms needed for computing the CMCD loss
+        x_t_prev = cmcd_state.x_t_prev
+        # These should be initialised to zero in the first step
+        mean_x_t_prev = cmcd_state.mean_x_t_prev
+        drift_correction_x_t_prev = cmcd_state.drift_correction_x_t_prev
+        # Initialised to the log density of the sample dsitribution in the first step
+        log_w = cmcd_state.log_w
+        # Unpack random key
+        key = cmcd_state.key
+        # Prepare steps to be passed to the drift correction network
+        t_input = jnp.expand_dims(jnp.repeat(jnp.atleast_1d(i)/(self.T-1), x_t_prev.shape[0], axis=0), axis=-1)
+
+        if first_step:
+            x_t = x_t_prev
+            # Evaluate score at starting step
+            score_x_t = score(x_t, 0.)
+            mean_x_t = x_t + self.step_size * score_x_t
+            # Prepare input to the drift correction network
+            x_t_input = jnp.concatenate([x_t, t_input], axis=-1)
+            # Compute drift correction
+            drift_correction_x_t = drift_correction_backward.apply(params_backward, x_t_input) * self.step_size
+        else:
+            # Split key and pass to the next step
+            key, subkey = jax.random.split(key)
+            # Generate random noise to perform the step
+            eps = jax.random.normal(subkey, shape=x_t_prev.shape)
+            # Generate next iterates
+            x_t = mean_x_t_prev + drift_correction_x_t_prev + jnp.sqrt(2*self.step_size)*eps
+            # Compute CMCD terms to pass to the next iterate
+            score_x_t = score(x_t, i/(self.T-1))
+            mean_x_t = x_t + self.step_size * score_x_t
+            # Prepare input for the drift correction network
+            x_t_input = jnp.concatenate([x_t, t_input], axis=-1)
+            # Need to compute backward and forward drift
+            # Backward drift: needs to be saved for next steps
+            drift_correction_backward_x_t = drift_correction_backward.apply(params_backward, x_t_input) * self.step_size
+            # Forward drift: used to compute the loss
+            drift_correction_forward_x_t = drift_correction_forward.apply(params_forward, x_t_input) * self.step_size
+            # Update log_w
+            log_w += -0.5 * (
+                jnp.sum((x_t_prev - mean_x_t + drift_correction_forward_x_t)**2, axis=1, keepdims=True) - 
+                jnp.sum((x_t - mean_x_t_prev - drift_correction_x_t_prev)**2, axis=1, keepdims=True)
+            ) / (2.*self.step_size)
+            # Save backward drift correction for the next step
+            drift_correction_x_t = drift_correction_backward_x_t
+        # Prepare updated CMCD state
+        new_cmcd_state = _CMCDScanState(
+            x_t_prev=x_t,
+            mean_x_t_prev=mean_x_t,
+            drift_correction_x_t_prev=drift_correction_x_t,
+            log_w=log_w,
+            key=key,
+        )
+        # Do not use accum_state, as we are interested in the last samples only
+        return new_cmcd_state, None
+    
     def cmcd_diffusion(
         self,
         params: jnp.array,
@@ -215,7 +294,9 @@ class LangevinDiffusion:
         log_density_target : Callable,
         log_density_sample: Callable,
         key: jnp.array,
+        double_drift_correction: bool = False
     ):
+        cmcd_step_fn = self._cmcd_step if not double_drift_correction else self._cmcd_step_multiple
         # Prepare common arguments for the CMCD step function
         common_args = dict(
             params=params,
@@ -231,7 +312,7 @@ class LangevinDiffusion:
             key = key,
         )
         # First step needs special treatment
-        cmcd_state, _ = self._cmcd_step(
+        cmcd_state, _ = cmcd_step_fn(
             initial_cmcd_state,
             i=0,
             first_step=True,
@@ -239,7 +320,7 @@ class LangevinDiffusion:
         )
         # Then scan through the rest.
         cmcd_step_fn = functools.partial(
-            self._cmcd_step,
+            cmcd_step_fn,
             first_step=False,
             **common_args
         )
@@ -266,6 +347,7 @@ class LangevinDiffusion:
         log_density_target : Callable,
         log_density_sample: Callable,
         key: jnp.array,
+        double_drift_correction: bool = False,
     ):
         _, log_w = self.cmcd_diffusion(
             params,
@@ -274,7 +356,8 @@ class LangevinDiffusion:
             score,
             log_density_target,
             log_density_sample,
-            key
+            key,
+            double_drift_correction,
         )
         # Ensure that loss is not proportional to the number of steps
         # so it is more easily comparable accross runs
@@ -289,6 +372,7 @@ class LangevinDiffusion:
         log_density_target : Callable,
         log_density_sample: Callable,
         key: jnp.array,
+        double_drift_correction: bool = False,
     ):
         _, log_w = self.cmcd_diffusion(
             params,
@@ -297,12 +381,9 @@ class LangevinDiffusion:
             score,
             log_density_target,
             log_density_sample,
-            key
+            key,
+            double_drift_correction,
         )
         # We are estimating the KL divergence, which is positive,
         # in here we use an alternative estimator for the KL divergence
         return jnp.mean((jnp.exp(log_w)-1.)-log_w) / self.T
-
-
-
-            

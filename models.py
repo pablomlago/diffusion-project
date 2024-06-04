@@ -6,9 +6,9 @@ import jax.numpy as jnp
 class MLP(nn.Module):
     """ A simple MLP in Flax. This is the noise-prediction or score function.
     """
-    hidden_dim: int = 32
-    out_dim: int = 1
-    n_layers: int = 2
+    hidden_dim: int
+    out_dim: int
+    n_layers: int
 
     @nn.compact
     def __call__(self, x):

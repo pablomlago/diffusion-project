@@ -20,7 +20,7 @@ from models import MLP
 from schedulers import NoiseScheduler, cosine_schedule
 from langevin import LangevinConfig, LangevinDiffusion
 from checkpointer import Checkpointer
-from visualisation_utils import plt_to_image, visualise_samples_density
+from visualisation_utils import plt_to_image, visualise_samples_density, plot_gmm
 from utils import wrap_fn
 
 # Define flags
@@ -30,22 +30,25 @@ FLAGS = flags.FLAGS
 flags.DEFINE_integer("T", 50, "Number of diffusion steps")
 flags.DEFINE_float("step_size", 0.01, "Size of each diffusion step")
 # Which model to use
-flags.DEFINE_enum("dataset", "gmm", ["gmm", "normal"], "Dataset choice")
+flags.DEFINE_enum("dataset", "gmm", ["gmm", "normal", "hard_gmm"], "Dataset choice")
 # Training params
 flags.DEFINE_string("checkpoint_dir", ".", "Directory to save checkpoint")
 flags.DEFINE_integer("seed", 0, "Random seed")
 flags.DEFINE_integer("n_steps", 1, "Number of training steps")
 flags.DEFINE_integer("n_batch", 128, "Batch size for training")
+flags.DEFINE_enum("optimiser", "adam", ["adam", "adamw"], "Optimiser choice")
 flags.DEFINE_float("lr", 3e-4, "Adam optimiser LR")
 flags.DEFINE_boolean("use_kl_loss", False, "Use alternative estimator for KL divergence")
+flags.DEFINE_boolean("use_double_drift", False, "Use different for correction in forward and backward procsses")
 # Test hyperparameters
-flags.DEFINE_integer("n_samples_train", 10_000, "Number of samples to use in training")
+flags.DEFINE_integer("n_samples_train", 128, "Number of samples to use in training")
 # Model hyperparameters
 flags.DEFINE_integer("hidden_dim", 128, "Dimension of hidden layers in the model")
 flags.DEFINE_integer("n_layers", 3, "Number of layers in the model")
 # Define number of validation steps
 flags.DEFINE_integer("n_steps_eval", 10, "Frequency for qualitative evaluation")
 flags.DEFINE_integer("n_samples_val", 4096, "Number of samples for validation")
+flags.DEFINE_integer("n_samples_test", 10_000, "Number of samples for qualitative evaluation")
 
 def main(argv):
     config={
@@ -59,8 +62,10 @@ def main(argv):
         "seed": FLAGS.seed,
         "n_steps": FLAGS.n_steps,
         "n_batch": FLAGS.n_batch,
+        "optimiser": FLAGS.optimiser,
         "lr": FLAGS.lr,
         "use_kl_loss": FLAGS.use_kl_loss,
+        "use_double_drift": FLAGS.use_double_drift,
         # Test hyperparameters
         "n_samples_train": FLAGS.n_samples_train,
         # Model hyperparameters
@@ -69,6 +74,7 @@ def main(argv):
         # Num steps eval
         "n_steps_eval": FLAGS.n_steps_eval,
         "n_samples_val": FLAGS.n_samples_val,
+        "n_samples_test": FLAGS.n_samples_test,
     }
     train_single(config)
 
@@ -108,29 +114,65 @@ def train(config=None, run_id=None):
     # Target distribution parameters
     data_model = load_model(noise_scheduler, model_name=config.dataset)
 
-    # Initialise drift correction model
-    drift_correction = MLP(hidden_dim=config.hidden_dim, out_dim=1, n_layers=config.n_layers)
-
     # Sample elements for initialisation
     key, subkey = jax.random.split(key)
     # Generate datasets for training and validation
-    x_train = jax.random.normal(key, shape=(config.n_samples_train, 1))
-    x_val = jax.random.normal(subkey, shape=(config.n_samples_val, 1))
+    x_train = jax.random.normal(key, shape=(config.n_samples_train, data_model.dim))
+    x_val = jax.random.normal(subkey, shape=(config.n_samples_val, data_model.dim))
 
     # Split key for initialisation
     key, subkey = jax.random.split(key)
-    # Initialise score network
+    # Prepare steps to initialise score network
     t_T = jnp.arange(T)
-    # Init with an element for all steps
-    params = drift_correction.init(key, jnp.concatenate([x_train[t_T], jnp.expand_dims(t_T, axis=-1)/(T-1)], axis=-1))
+    # Backward diffusion correction model
+    drift_correction_backward = MLP(hidden_dim=config.hidden_dim, out_dim=data_model.dim, n_layers=config.n_layers)
+    # Init forward and backward models
+    params_backward = drift_correction_backward.init(key, jnp.concatenate([x_train[t_T], jnp.expand_dims(t_T, axis=-1)/(T-1)], axis=-1))
+    # Obtain last layer of backward kernel
+    output_layer_name = list(params_backward['params'].keys())[-1]
+    # Zero in backward
+    params_backward["params"][output_layer_name]["kernel"] = jnp.zeros_like(params_backward["params"][output_layer_name]["kernel"])
+    params_backward["params"][output_layer_name]["bias"] = jnp.zeros_like(params_backward["params"][output_layer_name]["bias"])
 
-    # Zero output layer to start from a better initial point
-    output_layer_name = list(params['params'].keys())[-1]
-    params["params"][output_layer_name]["kernel"] = jnp.zeros_like(params["params"][output_layer_name]["kernel"])
-    params["params"][output_layer_name]["bias"] = jnp.zeros_like(params["params"][output_layer_name]["bias"])
+    if config.use_double_drift:
+        drift_correction_forward = MLP(hidden_dim=config.hidden_dim, out_dim=1, n_layers=config.n_layers)
+        params_forward = drift_correction_forward.init(subkey, jnp.concatenate([x_train[t_T], jnp.expand_dims(t_T, axis=-1)/(T-1)], axis=-1))
+        output_layer_name = list(params_forward['params'].keys())[-1]
+        params_forward["params"][output_layer_name]["kernel"] = jnp.zeros_like(params_forward["params"][output_layer_name]["kernel"])
+        params_forward["params"][output_layer_name]["bias"] = jnp.zeros_like(params_forward["params"][output_layer_name]["bias"])
+        # Store boths set of parameters jointly
+        params = (params_backward, params_backward)
+        drift_correction = (drift_correction_backward, drift_correction_backward)
+    else:
+        # Otherwise use a single network
+        params = params_backward
+        drift_correction = drift_correction_backward
+
+    # Initialise loss and diffusion functions
+    loss_fn = langevin_diffuser.cmcd_train_loss if not config.use_kl_loss else langevin_diffuser.cmcd_kl_loss
+    loss_fn = partial(
+        loss_fn,
+        double_drift_correction=config.use_double_drift,
+    )
+    diffusion_fn = partial(
+        langevin_diffuser.cmcd_diffusion,
+        double_drift_correction=config.use_double_drift
+    )
     
     # Optimiser initialisation
-    opt = optax.adam(learning_rate=config.lr)
+    if config.optimiser == "adam":
+        opt = optax.adam(learning_rate=config.lr)
+    else:
+        opt = optax.chain(
+            optax.scale_by_schedule(
+                optax.cosine_decay_schedule(1.0, config.n_steps, 1e-5)
+            ),
+            optax.adamw(config.lr, b1=0.9, b2=0.99, eps=1e-8, weight_decay=1e-4),
+            optax.scale_by_schedule(
+                optax.linear_schedule(0.0, 1.0, 10)
+            )
+        )
+
     opt_state = opt.init(params)
 
     # Training parameters
@@ -143,12 +185,10 @@ def train(config=None, run_id=None):
     # Best loss
     best_loss = float('inf')
 
-    loss_fn = langevin_diffuser.cmcd_kl_loss if config.use_kl_loss else langevin_diffuser.cmcd_train_loss
-
     # Run training loop
     with trange(n_steps) as steps:
         for step in steps:
-            key, subkey = jax.random.split(key)
+            # key, subkey = jax.random.split(key)
             # Draw a random batch from the train data
             batch_idxs = jax.random.choice(key, x_train.shape[0], shape=(n_batch,))
             x_T = x_train[batch_idxs]
@@ -177,7 +217,7 @@ def train(config=None, run_id=None):
             # Compute histogram of log_w
             if step % config.n_steps_eval == 0:
                 # Use validation data
-                x_0, log_w = langevin_diffuser.cmcd_diffusion(
+                x_0, log_w = diffusion_fn(
                     params,
                     x_val,
                     drift_correction,
@@ -204,8 +244,8 @@ def train(config=None, run_id=None):
     # Use for sampling
     key, subkey = jax.random.split(key)
     # Generate test set for qualitative evaluation
-    x_T = jax.random.normal(key, shape=(config.n_samples_train, 1))
-    x_0, log_w = langevin_diffuser.cmcd_diffusion(
+    x_T = jax.random.normal(key, shape=(config.n_samples_test, data_model.dim))
+    x_0, log_w = diffusion_fn(
         params,
         x_T,
         drift_correction,
@@ -215,11 +255,20 @@ def train(config=None, run_id=None):
         subkey,
     )
 
-    # Compute densities
-    fig, ax = visualise_samples_density([x_T, x_0], [
-        wrap_fn(data_model.noisy_density, 1.0), data_model.density, norm.pdf,
-    ], ["sample", "target", "standard"])
-    wandb.log({"Trained Model Samples": wandb.Image(plt_to_image(fig))})
+    if data_model.dim == 1:
+        # Compute densities
+        fig, ax = visualise_samples_density([x_T, x_0], [
+            wrap_fn(data_model.noisy_density, 1.0), data_model.density, norm.pdf,
+        ], ["sample", "target", "standard"])
+        wandb.log({"Trained Model Samples": wandb.Image(plt_to_image(fig))})
+    elif data_model.dim == 2:
+        fig, ax = plot_gmm(
+            x_0[:1000],
+            lambda x : jnp.squeeze(data_model.log_density(x)),
+            1.5,
+        )
+        wandb.log({f"Trained Model Samples": wandb.Image(fig)})
+
     # Create final histogram
     wandb.log({"Test Log w": wandb.Histogram(np.array(-log_w))})
     # Finish
